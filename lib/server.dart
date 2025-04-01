@@ -4,154 +4,227 @@ import 'package:shelf/shelf_io.dart' as shelf_io;
 import 'package:shelf_router/shelf_router.dart';
 import 'package:uuid/uuid.dart';
 
-// Liste pour stocker les capteurs enregistrés
+// Stockage des capteurs enregistrés
 final Map<String, Map<String, String>> thingsRegistry =
-    {}; // Clé = ID, Valeur = Map (Type, API Key)
+    {}; // ID -> {Type, API Key}
 
-// Liste pour stocker les données de télémétrie des capteurs
+// Stockage des données de télémétrie
 final Map<String, List<Map<String, dynamic>>> telemetryData =
-    {}; // Clé = ID, Valeur = Liste des données de télémétrie
+    {}; // ID -> Liste des données
+
+// Stockage des attributs des capteurs
+final Map<String, Map<String, dynamic>> attributesData =
+    {}; // ID -> Map des attributs
+
+// Stockage des attributs globaux du serveur
+final Map<String, dynamic> serverAttributes = {};
+
+// Stockage des attributs client des capteurs
+final Map<String, Map<String, dynamic>> clientAttributesData = {};
 
 String generateApiKey() {
-  var uuid = Uuid();
-  return uuid.v4(); // Génère un UUID unique
+  return Uuid().v4();
 }
 
 void main() async {
   final router =
       Router()
-        ..post('/register', registerThing) // Route pour enregistrer un capteur
-        ..get(
-          '/things',
-          getRegisteredThings,
-        ) // Route pour voir les capteurs enregistrés
-        ..get('/interact/<id>', interactWithThing) // Route d'interaction
-        ..post('/telemetry/<id>', receivedInformation)
+        ..post('/register', registerThing)
+        ..get('/things', getRegisteredThings)
+        ..post('/telemetry/<id>', receiveTelemetry)
+        ..get('/telemetry/<id>', getTelemetryData)
+        ..post('/attributes/<id>', setAttributes)
+        ..get('/attributes/<id>', getAttributes)
+        ..post('/server/attributes', setServerAttributes)
+        ..get('/server/attributes', getServerAttributes)
         ..delete('/unregister/<id>', unregisterThing);
 
   final handler = Pipeline().addMiddleware(logRequests()).addHandler(router);
-
   final server = await shelf_io.serve(handler, 'localhost', 8081);
   print('✅ Serveur démarré sur http://${server.address.host}:${server.port}');
 }
 
-// 🔹 Fonction d'enregistrement d'un capteur
+// 🔹 Enregistrement d'un capteur
 Future<Response> registerThing(Request request) async {
-  final payload = await request.readAsString();
-  final data = jsonDecode(payload);
+  try {
+    final payload = await request.readAsString();
+    final data = jsonDecode(payload);
 
-  final String id = data['id'];
-  final String type = data['type'];
+    final String? id = data['id'];
+    final String? type = data['type'];
 
-  if (id.isEmpty || type.isEmpty) {
-    return Response.badRequest(body: '❌ ID et Type sont requis');
+    if (id == null || type == null || id.isEmpty || type.isEmpty) {
+      return Response.badRequest(
+        body: jsonEncode({'error': '❌ ID et Type sont requis'}),
+      );
+    }
+
+    if (thingsRegistry.containsKey(id)) {
+      return Response(
+        400,
+        body: jsonEncode({'error': '❌ Ce capteur est déjà enregistré'}),
+      );
+    }
+
+    String apiKey = generateApiKey();
+    thingsRegistry[id] = {'type': type, 'apiKey': apiKey};
+
+    print('📌 Thing enregistré: ID=$id, Type=$type, API Key=$apiKey');
+    return Response.ok(
+      jsonEncode({'message': '✅ Thing enregistré', 'apiKey': apiKey}),
+    );
+  } catch (e) {
+    return Response(500, body: jsonEncode({'error': '❌ Erreur interne'}));
   }
-
-  // Vérifie si le capteur est déjà enregistré
-  if (thingsRegistry.containsKey(id)) {
-    return Response(400, body: '❌ Ce capteur est déjà enregistré');
-  }
-
-  // Génère une clé API unique pour ce capteur
-  String apiKey = generateApiKey();
-  // Ajoute le capteur et sa clé API à la liste
-  thingsRegistry[id] = {'type': type, 'apiKey': apiKey};
-
-  print('📌 Nouveau thing enregistré: ID=$id, Type=$type, API Key=$apiKey');
-
-  return Response.ok(
-    jsonEncode({'message': '✅ Thing enregistré', 'apiKey': apiKey}),
-  );
 }
 
-// 🔹 Fonction pour récupérer la liste des capteurs enregistrés
+// 🔹 Récupération des capteurs enregistrés
 Response getRegisteredThings(Request request) {
   return Response.ok(jsonEncode({'things': thingsRegistry}));
 }
 
-// 🔹 Fonction pour interagir avec un capteur (exemple)
-Future<Response> interactWithThing(Request request, String id) async {
-  // Vérifie si le capteur existe dans le registre
-  final thing = thingsRegistry[id];
-
-  if (thing == null) {
-    return Response(403, body: '❌ Ce capteur n\'est pas enregistré.');
-  }
-
-  // Récupère la clé API envoyée avec la requête
-  final apiKeyFromRequest = request.headers['Authorization'];
-
-  // Si la clé API est présente, compare-la avec celle enregistrée pour ce capteur
-  if (apiKeyFromRequest == null || thing['apiKey'] != apiKeyFromRequest) {
-    return Response(403, body: '❌ Clé API invalide');
-  }
-
-  return Response.ok('🔹 Interaction réussie avec le capteur $id');
-}
-
-// 🔹 Fonction pour désenregistrer un capteur et supprimer ses données
+// 🔹 Désenregistrement d'un capteur
 Response unregisterThing(Request request, String id) {
   if (!thingsRegistry.containsKey(id)) {
-    return Response(404, body: '❌ Ce capteur n\'existe pas.');
+    return Response(
+      404,
+      body: jsonEncode({'error': '❌ Ce capteur n\'existe pas.'}),
+    );
   }
 
-  // Supprime le capteur
   thingsRegistry.remove(id);
-  print('🗑️ Capteur supprimé: ID=$id');
+  telemetryData.remove(id);
+  attributesData.remove(id);
+  clientAttributesData.remove(id);
 
-  return Response.ok(
-    jsonEncode({'message': '✅ Capteur supprimé et données effacées'}),
-  );
+  print('🗑️ Capteur supprimé: ID=$id');
+  return Response.ok(jsonEncode({'message': '✅ Capteur supprimé'}));
 }
 
-// 🔹 Fonction pour recevoir les données de télémétrie d'un capteur
-Future<Response> receivedInformation(Request request, String id) async {
+// 🔹 Réception des données de télémétrie
+Future<Response> receiveTelemetry(Request request, String id) async {
   final thing = thingsRegistry[id];
+  if (thing == null)
+    return Response(
+      404,
+      body: jsonEncode({'error': '❌ Capteur non enregistré'}),
+    );
 
-  // Vérifie si le capteur existe
-  if (thing == null) {
-    return Response(404, body: '❌ Ce capteur n\'est pas enregistré.');
+  final apiKeyFromRequest = request.headers['Authorization'];
+  if (apiKeyFromRequest == null || thing['apiKey'] != apiKeyFromRequest) {
+    return Response(403, body: jsonEncode({'error': '❌ Clé API invalide'}));
   }
 
   final payload = await request.readAsString();
   final data = jsonDecode(payload);
 
-  // On suppose que la télémétrie est envoyée sous forme de { "type": "temperature", "value": 23.5 }
-  final String type = data['type'];
+  final String? type = data['type'];
   final dynamic value = data['value'];
 
   if (type == null || value == null) {
     return Response(
       400,
-      body: '❌ Le type et la valeur de la télémétrie sont requis.',
+      body: jsonEncode({'error': '❌ Type et valeur sont requis'}),
     );
   }
 
-  // Récupère la clé API envoyée avec la requête
-  final apiKeyFromRequest = request.headers['Authorization'];
-
-  // Si la clé API est présente, compare-la avec celle enregistrée pour ce capteur
-  if (apiKeyFromRequest == null || thing['apiKey'] != apiKeyFromRequest) {
-    return Response(403, body: '❌ Clé API invalide');
-  }
-
-  // Enregistre les données de télémétrie dans le Map pour ce capteur
-  if (!telemetryData.containsKey(id)) {
-    telemetryData[id] =
-        []; // Si le capteur n'a pas encore de données, initialise une liste
-  }
-
-  telemetryData[id]?.add({
+  telemetryData.putIfAbsent(id, () => []);
+  telemetryData[id]!.add({
     'type': type,
     'value': value,
-    'timestamp':
-        DateTime.now()
-            .toIso8601String(), // On ajoute un timestamp pour la donnée
+    'timestamp': DateTime.now().toIso8601String(),
   });
 
-  print('📊 Télémétrie reçue pour le capteur $id: Type=$type, Valeur=$value');
+  print('📊 Télémétrie reçue pour $id: Type=$type, Valeur=$value');
+  return Response.ok(jsonEncode({'message': '✅ Télémétrie enregistrée'}));
+}
+
+// 🔹 Récupération des données de télémétrie
+Response getTelemetryData(Request request, String id) {
+  if (!telemetryData.containsKey(id)) {
+    return Response(
+      404,
+      body: jsonEncode({'error': '❌ Aucune donnée trouvée'}),
+    );
+  }
+  return Response.ok(jsonEncode({'id': id, 'telemetry': telemetryData[id]}));
+}
+
+// 🔹 Définition des attributs d'un capteur
+Future<Response> setAttributes(Request request, String id) async {
+  final thing = thingsRegistry[id];
+  if (thing == null)
+    return Response(
+      404,
+      body: jsonEncode({'error': '❌ Capteur non enregistré'}),
+    );
+
+  final apiKeyFromRequest = request.headers['Authorization'];
+  if (apiKeyFromRequest == null || thing['apiKey'] != apiKeyFromRequest) {
+    return Response(403, body: jsonEncode({'error': '❌ Clé API invalide'}));
+  }
+
+  final payload = await request.readAsString();
+  final data = jsonDecode(payload);
+
+  if (data.isEmpty)
+    return Response(
+      400,
+      body: jsonEncode({'error': '❌ Aucun attribut fourni'}),
+    );
+
+  attributesData.putIfAbsent(id, () => {});
+  attributesData[id]!.addAll(data);
+
+  print('📊 Attributs mis à jour pour $id: $data');
+  return Response.ok(jsonEncode({'message': '✅ Attributs mis à jour'}));
+}
+
+// 🔹 Récupération des attributs d'un capteur
+Response getAttributes(Request request, String id) {
+  if (!attributesData.containsKey(id)) {
+    return Response(404, body: '❌ Aucun attribut trouvé pour ce capteur.');
+  }
+
+  // Récupérer le type d'attribut demandé (client ou serveur)
+  final type = request.url.queryParameters['type'];
+
+  if (type == 'client') {
+    return Response.ok(
+      jsonEncode({'id': id, 'attributes': clientAttributesData[id] ?? {}}),
+    );
+  } else if (type == 'server') {
+    return Response.ok(
+      jsonEncode({'id': id, 'attributes': serverAttributes[id] ?? {}}),
+    );
+  } else {
+    // Si aucun type spécifié, on renvoie tous les attributs
+    return Response.ok(
+      jsonEncode({'id': id, 'attributes': attributesData[id]}),
+    );
+  }
+}
+
+// 🔹 Définition des attributs du serveur
+Future<Response> setServerAttributes(Request request) async {
+  final payload = await request.readAsString();
+  final data = jsonDecode(payload);
+
+  if (data.isEmpty)
+    return Response(
+      400,
+      body: jsonEncode({'error': '❌ Aucun attribut fourni'}),
+    );
+
+  serverAttributes.addAll(data);
+  print('📊 Attributs du serveur mis à jour: $serverAttributes');
 
   return Response.ok(
-    jsonEncode({'message': '✅ Données de télémétrie enregistrées'}),
+    jsonEncode({'message': '✅ Attributs du serveur mis à jour'}),
   );
+}
+
+// 🔹 Récupération des attributs du serveur
+Response getServerAttributes(Request request) {
+  return Response.ok(jsonEncode({'serverAttributes': serverAttributes}));
 }
