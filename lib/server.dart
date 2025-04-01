@@ -12,15 +12,11 @@ final Map<String, Map<String, String>> thingsRegistry =
 final Map<String, List<Map<String, dynamic>>> telemetryData =
     {}; // ID -> Liste des données
 
-// Stockage des attributs des capteurs
-final Map<String, Map<String, dynamic>> attributesData =
-    {}; // ID -> Map des attributs
-
-// Stockage des attributs globaux du serveur
-final Map<String, dynamic> serverAttributes = {};
-
-// Stockage des attributs client des capteurs
-final Map<String, Map<String, dynamic>> clientAttributesData = {};
+// Stockage des attributs des capteurs (client et serveur séparés)
+final Map<String, Map<String, dynamic>> clientAttributesData =
+    {}; // ID -> Attributs Client
+final Map<String, dynamic> serverAttributes =
+    {}; // Attributs globaux du serveur
 
 String generateApiKey() {
   return Uuid().v4();
@@ -33,10 +29,9 @@ void main() async {
         ..get('/things', getRegisteredThings)
         ..post('/telemetry/<id>', receiveTelemetry)
         ..get('/telemetry/<id>', getTelemetryData)
-        ..post('/attributes/<id>', setAttributes)
+        ..post('/attributes/<id>', updateAttributes)
         ..get('/attributes/<id>', getAttributes)
-        ..post('/server/attributes', setServerAttributes)
-        ..get('/server/attributes', getServerAttributes)
+        ..delete('/attributes/<id>', deleteAttributes)
         ..delete('/unregister/<id>', unregisterThing);
 
   final handler = Pipeline().addMiddleware(logRequests()).addHandler(router);
@@ -94,7 +89,6 @@ Response unregisterThing(Request request, String id) {
 
   thingsRegistry.remove(id);
   telemetryData.remove(id);
-  attributesData.remove(id);
   clientAttributesData.remove(id);
 
   print('🗑️ Capteur supprimé: ID=$id');
@@ -103,61 +97,52 @@ Response unregisterThing(Request request, String id) {
 
 // 🔹 Réception des données de télémétrie
 Future<Response> receiveTelemetry(Request request, String id) async {
-  final thing = thingsRegistry[id];
-  if (thing == null)
+  if (!thingsRegistry.containsKey(id)) {
     return Response(
       404,
       body: jsonEncode({'error': '❌ Capteur non enregistré'}),
     );
-
-  final apiKeyFromRequest = request.headers['Authorization'];
-  if (apiKeyFromRequest == null || thing['apiKey'] != apiKeyFromRequest) {
-    return Response(403, body: jsonEncode({'error': '❌ Clé API invalide'}));
   }
 
   final payload = await request.readAsString();
   final data = jsonDecode(payload);
 
-  final String? type = data['type'];
-  final dynamic value = data['value'];
-
-  if (type == null || value == null) {
+  if (data.isEmpty) {
     return Response(
       400,
-      body: jsonEncode({'error': '❌ Type et valeur sont requis'}),
+      body: jsonEncode({'error': '❌ Données de télémétrie invalides'}),
     );
   }
 
   telemetryData.putIfAbsent(id, () => []);
-  telemetryData[id]!.add({
-    'type': type,
-    'value': value,
-    'timestamp': DateTime.now().toIso8601String(),
-  });
+  telemetryData[id]!.add(data);
 
-  print('📊 Télémétrie reçue pour $id: Type=$type, Valeur=$value');
+  print('📡 Télémétrie reçue pour $id: $data');
   return Response.ok(jsonEncode({'message': '✅ Télémétrie enregistrée'}));
 }
 
 // 🔹 Récupération des données de télémétrie
 Response getTelemetryData(Request request, String id) {
-  if (!telemetryData.containsKey(id)) {
-    return Response(
-      404,
-      body: jsonEncode({'error': '❌ Aucune donnée trouvée'}),
-    );
-  }
-  return Response.ok(jsonEncode({'id': id, 'telemetry': telemetryData[id]}));
-}
-
-// 🔹 Définition des attributs d'un capteur
-Future<Response> setAttributes(Request request, String id) async {
-  final thing = thingsRegistry[id];
-  if (thing == null)
+  if (!thingsRegistry.containsKey(id)) {
     return Response(
       404,
       body: jsonEncode({'error': '❌ Capteur non enregistré'}),
     );
+  }
+
+  final data = telemetryData[id] ?? [];
+  return Response.ok(jsonEncode({'id': id, 'telemetry': data}));
+}
+
+// 🔹 Mise à jour des attributs (client ou serveur) d'un capteur
+Future<Response> updateAttributes(Request request, String id) async {
+  final thing = thingsRegistry[id];
+  if (thing == null) {
+    return Response(
+      404,
+      body: jsonEncode({'error': '❌ Capteur non enregistré'}),
+    );
+  }
 
   final apiKeyFromRequest = request.headers['Authorization'];
   if (apiKeyFromRequest == null || thing['apiKey'] != apiKeyFromRequest) {
@@ -166,65 +151,87 @@ Future<Response> setAttributes(Request request, String id) async {
 
   final payload = await request.readAsString();
   final data = jsonDecode(payload);
+  final type = request.url.queryParameters['type']; // "server" ou "client"
 
-  if (data.isEmpty)
+  if (data.isEmpty) {
     return Response(
       400,
       body: jsonEncode({'error': '❌ Aucun attribut fourni'}),
     );
+  }
 
-  attributesData.putIfAbsent(id, () => {});
-  attributesData[id]!.addAll(data);
-
-  print('📊 Attributs mis à jour pour $id: $data');
-  return Response.ok(jsonEncode({'message': '✅ Attributs mis à jour'}));
+  if (type == 'server') {
+    serverAttributes.addAll(data);
+    print('📊 Attributs serveur mis à jour: $data');
+    return Response.ok(
+      jsonEncode({'message': '✅ Attributs serveur mis à jour'}),
+    );
+  } else {
+    clientAttributesData.putIfAbsent(id, () => {});
+    clientAttributesData[id]!.addAll(data);
+    print('📊 Attributs client mis à jour pour $id: $data');
+    return Response.ok(
+      jsonEncode({'message': '✅ Attributs client mis à jour'}),
+    );
+  }
 }
 
 // 🔹 Récupération des attributs d'un capteur
 Response getAttributes(Request request, String id) {
-  if (!attributesData.containsKey(id)) {
-    return Response(404, body: '❌ Aucun attribut trouvé pour ce capteur.');
+  if (!thingsRegistry.containsKey(id)) {
+    return Response(
+      404,
+      body: jsonEncode({'error': '❌ Capteur non enregistré'}),
+    );
   }
 
-  // Récupérer le type d'attribut demandé (client ou serveur)
-  final type = request.url.queryParameters['type'];
+  final type = request.url.queryParameters['type']; // "server" ou "client"
 
-  if (type == 'client') {
+  if (type == 'server') {
+    return Response.ok(jsonEncode({'id': id, 'attributes': serverAttributes}));
+  } else if (type == 'client') {
     return Response.ok(
       jsonEncode({'id': id, 'attributes': clientAttributesData[id] ?? {}}),
     );
-  } else if (type == 'server') {
-    return Response.ok(
-      jsonEncode({'id': id, 'attributes': serverAttributes[id] ?? {}}),
-    );
   } else {
-    // Si aucun type spécifié, on renvoie tous les attributs
     return Response.ok(
-      jsonEncode({'id': id, 'attributes': attributesData[id]}),
+      jsonEncode({
+        'id': id,
+        'serverAttributes': serverAttributes,
+        'clientAttributes': clientAttributesData[id] ?? {},
+      }),
     );
   }
 }
 
-// 🔹 Définition des attributs du serveur
-Future<Response> setServerAttributes(Request request) async {
-  final payload = await request.readAsString();
-  final data = jsonDecode(payload);
+// 🔹 Suppression des attributs d'un capteur
+Response deleteAttributes(Request request, String id) {
+  if (!thingsRegistry.containsKey(id)) {
+    return Response(
+      404,
+      body: jsonEncode({'error': '❌ Capteur non enregistré'}),
+    );
+  }
 
-  if (data.isEmpty)
+  final type = request.url.queryParameters['type']; // "server" ou "client"
+
+  if (type == 'server') {
+    serverAttributes.clear();
+    print('🗑️ Tous les attributs serveur supprimés');
+    return Response.ok(
+      jsonEncode({'message': '✅ Tous les attributs serveur supprimés'}),
+    );
+  } else if (type == 'client') {
+    clientAttributesData.remove(id);
+    print('🗑️ Attributs client supprimés pour $id');
+    return Response.ok(jsonEncode({'message': '✅ Attributs client supprimés'}));
+  } else {
     return Response(
       400,
-      body: jsonEncode({'error': '❌ Aucun attribut fourni'}),
+      body: jsonEncode({
+        'error':
+            '❌ Spécifier le type d\'attribut à supprimer (server ou client)',
+      }),
     );
-
-  serverAttributes.addAll(data);
-  print('📊 Attributs du serveur mis à jour: $serverAttributes');
-
-  return Response.ok(
-    jsonEncode({'message': '✅ Attributs du serveur mis à jour'}),
-  );
-}
-
-// 🔹 Récupération des attributs du serveur
-Response getServerAttributes(Request request) {
-  return Response.ok(jsonEncode({'serverAttributes': serverAttributes}));
+  }
 }
