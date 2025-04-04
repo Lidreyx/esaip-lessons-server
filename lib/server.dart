@@ -96,6 +96,7 @@ Response unregisterThing(Request request, String id) {
 }
 
 // 🔹 Réception des données de télémétrie
+// 🔹 Réception des données de télémétrie avec timestamp
 Future<Response> receiveTelemetry(Request request, String id) async {
   if (!thingsRegistry.containsKey(id)) {
     return Response(
@@ -114,10 +115,13 @@ Future<Response> receiveTelemetry(Request request, String id) async {
     );
   }
 
-  telemetryData.putIfAbsent(id, () => []);
-  telemetryData[id]!.add(data);
+  final timestamp = DateTime.now().toIso8601String();
+  final telemetryEntry = {'data': data, 'timestamp': timestamp};
 
-  print('📡 Télémétrie reçue pour $id: $data');
+  telemetryData.putIfAbsent(id, () => []);
+  telemetryData[id]!.add(telemetryEntry);
+
+  print('📡 Télémétrie reçue pour $id: $telemetryEntry');
   return Response.ok(jsonEncode({'message': '✅ Télémétrie enregistrée'}));
 }
 
@@ -160,16 +164,26 @@ Future<Response> updateAttributes(Request request, String id) async {
     );
   }
 
+  final timestamp = DateTime.now().toIso8601String();
+
   if (type == 'server') {
-    serverAttributes.addAll(data);
-    print('📊 Attributs serveur mis à jour: $data');
+    data.forEach((key, value) {
+      serverAttributes[key] = {'value': value, 'timestamp': timestamp};
+    });
+
+    print('📊 Attributs serveur mis à jour: $serverAttributes');
     return Response.ok(
       jsonEncode({'message': '✅ Attributs serveur mis à jour'}),
     );
   } else {
     clientAttributesData.putIfAbsent(id, () => {});
-    clientAttributesData[id]!.addAll(data);
-    print('📊 Attributs client mis à jour pour $id: $data');
+    data.forEach((key, value) {
+      clientAttributesData[id]![key] = {'value': value, 'timestamp': timestamp};
+    });
+
+    print(
+      '📊 Attributs client mis à jour pour $id: ${clientAttributesData[id]}',
+    );
     return Response.ok(
       jsonEncode({'message': '✅ Attributs client mis à jour'}),
     );
